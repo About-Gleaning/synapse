@@ -1,0 +1,4 @@
+import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
+export function ChatTracePanel(props) {
+    return (_jsxs("section", { className: "panel", children: [_jsx("h3", { children: "\u601D\u8003\u8FC7\u7A0B" }), _jsx("div", { className: "muted", children: props.hasFinalTrace ? "已生成最终过程摘要" : props.isRunning ? "阶段更新中" : "等待提问" }), _jsxs("div", { style: { marginTop: 8 }, children: [props.items.length === 0 ? _jsx("div", { className: "muted", children: "\u6682\u65E0\u8FC7\u7A0B\u4FE1\u606F" }) : null, props.items.map((item) => (_jsxs("article", { className: "trace-item", children: [_jsx("div", { children: _jsx("strong", { children: item.title }) }), _jsx("div", { children: item.content }), item.timestamp ? _jsx("div", { className: "muted", children: item.timestamp }) : null] }, item.key)))] })] }));
+}

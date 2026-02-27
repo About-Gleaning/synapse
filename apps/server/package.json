@@ -1,0 +1,26 @@
+{
+  "name": "@synapse/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "test": "tsx --test tests/**/*.test.ts"
+  },
+  "dependencies": {
+    "@fastify/cors": "^10.1.0",
+    "@synapse/shared": "file:../../packages/shared",
+    "fastify": "^5.2.1",
+    "nanoid": "^5.1.5"
+  },
+  "optionalDependencies": {
+    "better-sqlite3": "^11.8.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3"
+  }
+}
