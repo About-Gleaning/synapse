@@ -316,9 +316,26 @@ async function streamChat(
     return;
   }
 
+  const finalScope = body.scopeOverride ?? scope;
+  if (finalScope.scopeType === "material" && !finalScope.scopeId) {
+    reply.hijack();
+    reply.raw.statusCode = 400;
+    reply.raw.end(JSON.stringify({ code: "BAD_REQUEST", message: "scopeOverride.scopeId 不能为空" }));
+    return;
+  }
+  if (finalScope.scopeType === "material" && finalScope.scopeId) {
+    const detail = ctx.materialService.getDetail(finalScope.scopeId);
+    if (!detail) {
+      reply.hijack();
+      reply.raw.statusCode = 404;
+      reply.raw.end(JSON.stringify({ code: "MATERIAL_NOT_FOUND", message: "资料不存在" }));
+      return;
+    }
+  }
+
   reply.hijack();
   try {
-    await ctx.chatService.streamAnswer(scope, body, reply);
+    await ctx.chatService.streamAnswer(finalScope, body, reply);
   } catch (err) {
     reply.raw.statusCode = 500;
     reply.raw.end(JSON.stringify({ code: "INTERNAL_ERROR", message: err instanceof Error ? err.message : "未知错误" }));

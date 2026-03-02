@@ -1,28 +1,31 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { CategoryNodeVO, ChatMessageVO, ChatThreadListItemVO, MaterialContentKind } from "@synapse/shared";
+import type { ChatMessageVO, ChatThreadListItemVO, MaterialContentKind, MaterialListVO } from "@synapse/shared";
+import { requestJson } from "../../../shared/api/httpClient";
 import { checkServerHealth, getThreadMessages, listThreads } from "../api/chatApi";
-import { ChatAnswerPanel } from "../components/ChatAnswerPanel";
-import { ChatAskInputPanel } from "../components/ChatAskInputPanel";
-import { ChatCitationsPanel } from "../components/ChatCitationsPanel";
-import { ChatProgressPanel } from "../components/ChatProgressPanel";
-import { ChatRunStatusBadge } from "../components/ChatRunStatusBadge";
-import { ChatTracePanel } from "../components/ChatTracePanel";
+import { MarkdownMessage } from "../components/MarkdownMessage";
+import { UnifiedChatAskInputPanel } from "../components/UnifiedChatAskInputPanel";
 import { useChatStreamRun } from "../hooks/useChatStreamRun";
-import {
-  selectAnswerMeta,
-  selectAnswerText,
-  selectCanRetry,
-  selectCitations,
-  selectOverallProgress,
-  selectRecoveryHint,
-  selectRunStatus,
-  selectStageTimeline,
-  selectTraceTimeline,
-} from "../model/chatRunSelectors";
-import { getCategoryTree } from "../../categories/api/categoryApi";
+import { selectAnswerMeta, selectAnswerText, selectCanRetry, selectCitations, selectRunStatus } from "../model/chatRunSelectors";
+import { extractSelectedMentionTokens, validateQuestionMention } from "../model/mentionUtils";
+
+interface SelectedMention {
+  materialId: string;
+  title: string;
+}
+
+interface MessageCitation {
+  citationId: string;
+  materialId: string;
+  materialTitle: string;
+  level: "brief_summary" | "detailed_notes" | "original";
+  snippet: string;
+}
 
 export interface GlobalChatFocusRequest {
-  threadId: string | null;
+  threadId?: string | null;
+  mentionMaterialId?: string;
+  mentionMaterialTitle?: string;
+  forceNewThread?: boolean;
   token: number;
 }
 
@@ -38,10 +41,13 @@ export interface GlobalChatPageContainerProps {
 
 export function GlobalChatPageContainer(props: GlobalChatPageContainerProps): React.JSX.Element {
   const [question, setQuestion] = useState("");
-  const [categoryIds, setCategoryIds] = useState<string[]>([]);
-  const [categoryOptions, setCategoryOptions] = useState<Array<{ id: string; path: string; depth: number }>>([]);
-  const [categoryLoading, setCategoryLoading] = useState(false);
-  const [categoryError, setCategoryError] = useState("");
+  const [mentionQuery, setMentionQuery] = useState("");
+  const [selectedMention, setSelectedMention] = useState<SelectedMention | null>(null);
+  const [mentionError, setMentionError] = useState("");
+  const [optimisticQuestion, setOptimisticQuestion] = useState("");
+
+  const [materials, setMaterials] = useState<MaterialListVO["items"]>([]);
+  const [materialsError, setMaterialsError] = useState("");
   const [threads, setThreads] = useState<ChatThreadListItemVO[]>([]);
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessageVO[]>([]);
@@ -50,6 +56,7 @@ export function GlobalChatPageContainer(props: GlobalChatPageContainerProps): Re
   const [serverHealthError, setServerHealthError] = useState("");
   const [serverChecking, setServerChecking] = useState(false);
   const initializedSelectionRef = useRef(false);
+  const messageScrollRef = useRef<HTMLDivElement | null>(null);
 
   const runHealthCheck = async (): Promise<boolean> => {
     setServerChecking(true);
@@ -65,12 +72,23 @@ export function GlobalChatPageContainer(props: GlobalChatPageContainerProps): Re
     }
   };
 
+  const loadMaterials = async (): Promise<void> => {
+    try {
+      setMaterialsError("");
+      const data = await requestJson<MaterialListVO>("/api/materials?page=1&pageSize=200", {
+        method: "GET",
+      });
+      setMaterials(data.items);
+    } catch (error) {
+      setMaterials([]);
+      setMaterialsError(error instanceof Error ? error.message : "资料列表加载失败");
+    }
+  };
+
   const loadThreads = async (): Promise<ChatThreadListItemVO[]> => {
     try {
       setThreadError("");
       const data = await listThreads({
-        scopeType: "global",
-        scopeId: null,
         page: 1,
         pageSize: 50,
       });
@@ -95,20 +113,6 @@ export function GlobalChatPageContainer(props: GlobalChatPageContainerProps): Re
     }
   };
 
-  const loadCategoryOptions = async (): Promise<void> => {
-    setCategoryLoading(true);
-    setCategoryError("");
-    try {
-      const tree = await getCategoryTree();
-      setCategoryOptions(flattenCategoryNodes(tree.nodes));
-    } catch (error) {
-      setCategoryOptions([]);
-      setCategoryError(error instanceof Error ? error.message : "分类加载失败");
-    } finally {
-      setCategoryLoading(false);
-    }
-  };
-
   const run = useChatStreamRun({
     mode: "global",
     onRunStarted: ({ threadId }) => {
@@ -118,8 +122,17 @@ export function GlobalChatPageContainer(props: GlobalChatPageContainerProps): Re
     onNeedRefreshMessages: async (threadId) => {
       await loadThreads();
       await loadMessages(threadId);
+      setOptimisticQuestion("");
     },
   });
+
+  const resetToNewThread = (): void => {
+    setSelectedThreadId(null);
+    setMessages([]);
+    setOptimisticQuestion("");
+    run.resetRunView();
+    initializedSelectionRef.current = true;
+  };
 
   useEffect(() => {
     setThreads([]);
@@ -131,7 +144,7 @@ export function GlobalChatPageContainer(props: GlobalChatPageContainerProps): Re
 
     void (async () => {
       await runHealthCheck();
-      await loadCategoryOptions();
+      await loadMaterials();
       const loaded = await loadThreads();
       if (!initializedSelectionRef.current && loaded.length > 0) {
         setSelectedThreadId(loaded[0].id);
@@ -143,9 +156,11 @@ export function GlobalChatPageContainer(props: GlobalChatPageContainerProps): Re
   useEffect(() => {
     if (!selectedThreadId) {
       setMessages([]);
+      run.resetRunView();
       return;
     }
     run.resetRunView();
+    setOptimisticQuestion("");
     void loadMessages(selectedThreadId);
   }, [selectedThreadId]);
 
@@ -153,227 +168,385 @@ export function GlobalChatPageContainer(props: GlobalChatPageContainerProps): Re
     if (!props.focusRequest) {
       return;
     }
-    setSelectedThreadId(props.focusRequest.threadId);
+    const mentionTitle = normalizeMentionTitle(props.focusRequest.mentionMaterialTitle);
+    if (props.focusRequest.mentionMaterialId && mentionTitle) {
+      setSelectedMention({
+        materialId: props.focusRequest.mentionMaterialId,
+        title: mentionTitle,
+      });
+      setQuestion(`@{${mentionTitle}} `);
+      setMentionQuery("");
+      setMentionError("");
+    }
+
+    if (props.focusRequest.forceNewThread) {
+      resetToNewThread();
+      return;
+    }
+
+    setSelectedThreadId(props.focusRequest.threadId ?? null);
     initializedSelectionRef.current = true;
   }, [props.focusRequest?.token]);
 
+  const mentionValidation = useMemo(() => {
+    return validateQuestionMention(question, selectedMention?.title ?? null);
+  }, [question, selectedMention?.title]);
+
+  const mentionCandidates = useMemo(() => {
+    const keyword = mentionQuery.trim().toLowerCase();
+    const sorted = [...materials].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    if (!keyword) {
+      return sorted.slice(0, 8).map((item) => ({
+        materialId: item.id,
+        title: item.title,
+      }));
+    }
+    return sorted
+      .filter((item) => item.title.toLowerCase().includes(keyword))
+      .slice(0, 8)
+      .map((item) => ({
+        materialId: item.id,
+        title: item.title,
+      }));
+  }, [materials, mentionQuery]);
+
   const status = selectRunStatus(run.runState);
-  const recoveryHint = selectRecoveryHint(run.runState);
-  const overallProgress = selectOverallProgress(run.runState);
-  const stageTimeline = selectStageTimeline(run.runState);
-  const traceTimeline = selectTraceTimeline(run.runState);
-  const citations = selectCitations(run.runState);
   const answer = selectAnswerText(run.runState);
   const answerMeta = selectAnswerMeta(run.runState);
   const canRetry = selectCanRetry(run.runState);
+  const liveCitations = selectCitations(run.runState);
 
   const canSubmit = useMemo(() => {
-    return question.trim().length > 0 && !run.isRunning && !serverChecking && !serverHealthError;
-  }, [question, run.isRunning, serverChecking, serverHealthError]);
+    return question.trim().length > 0 && mentionValidation.ok && !run.isRunning && !serverChecking && !serverHealthError;
+  }, [question, mentionValidation.ok, run.isRunning, serverChecking, serverHealthError]);
+
+  const selectedThread = useMemo(() => {
+    if (!selectedThreadId) {
+      return null;
+    }
+    return threads.find((item) => item.id === selectedThreadId) ?? null;
+  }, [threads, selectedThreadId]);
+
+  const latestAssistantMessage = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      const item = messages[i];
+      if (item?.role === "assistant") {
+        return normalizeForDedup(item.content);
+      }
+    }
+    return "";
+  }, [messages]);
+
+  const currentLiveAnswer = useMemo(() => normalizeForDedup(answer.text), [answer.text]);
+
+  const shouldHideDuplicatedLiveAnswer = useMemo(() => {
+    if (run.runState.status !== "completed") {
+      return false;
+    }
+    if (!currentLiveAnswer || !latestAssistantMessage) {
+      return false;
+    }
+    return currentLiveAnswer === latestAssistantMessage;
+  }, [run.runState.status, currentLiveAnswer, latestAssistantMessage]);
+
+  useEffect(() => {
+    const el = messageScrollRef.current;
+    if (!el) {
+      return;
+    }
+    el.scrollTo({
+      top: el.scrollHeight,
+      behavior: "smooth",
+    });
+  }, [messages, optimisticQuestion, answer.text, liveCitations.length, answerMeta.error]);
+
+  const liveAnswerVisible = (run.runState.runId !== null || !!answer.text || !!answerMeta.error) && !shouldHideDuplicatedLiveAnswer;
 
   return (
-    <section id={props.sectionId}>
-      <section className="panel" style={{ marginBottom: 14 }}>
-        <h3>全局会话</h3>
-        <div className="toolbar" style={{ marginBottom: 12 }}>
-          <ChatRunStatusBadge status={status} />
-          <span className="muted">Thread: {selectedThreadId ?? "新会话"}</span>
-          <span className="muted">Run: {run.lastRunId || "-"}</span>
-        </div>
-        {recoveryHint ? <div className="muted">{recoveryHint}</div> : null}
-        <div className="toolbar">
-          <select
-            value={selectedThreadId ?? ""}
-            onChange={(e) => {
-              setSelectedThreadId(e.target.value || null);
-              initializedSelectionRef.current = true;
-            }}
-          >
-            <option value="">新会话（不加载历史）</option>
-            {threads.map((item) => (
-              <option key={item.id} value={item.id}>
-                {item.title}（{item.messageCount} 条）
-              </option>
-            ))}
-          </select>
-          <button
-            onClick={() => {
-              setSelectedThreadId(null);
-              setMessages([]);
-              run.resetRunView();
-              initializedSelectionRef.current = true;
-            }}
-          >
-            新建会话
-          </button>
-          <button
-            onClick={async () => {
-              const loaded = await loadThreads();
-              if (!selectedThreadId && loaded.length > 0 && !initializedSelectionRef.current) {
-                setSelectedThreadId(loaded[0].id);
+    <section id={props.sectionId} className="chat-workspace-shell">
+      <aside className="chat-sidebar">
+        <button
+          className="primary"
+          disabled={run.isRunning}
+          onClick={() => {
+            resetToNewThread();
+            setQuestion("");
+            setMentionQuery("");
+            setSelectedMention(null);
+            setMentionError("");
+          }}
+        >
+          新建会话
+        </button>
+
+        <div className="chat-thread-list">
+          {threads.map((item) => (
+            <button
+              key={item.id}
+              className={`chat-thread-item ${selectedThreadId === item.id ? "active" : ""}`}
+              disabled={run.isRunning}
+              onClick={() => {
+                setSelectedThreadId(item.id);
                 initializedSelectionRef.current = true;
-              }
-            }}
-          >
-            刷新会话
-          </button>
+              }}
+            >
+              <div className="chat-thread-title">{item.title || "未命名会话"}</div>
+              <div className="chat-thread-meta">{item.lastMessageAt || item.updatedAt}</div>
+            </button>
+          ))}
+          {threads.length === 0 ? <div className="muted">暂无会话</div> : null}
         </div>
-        {threadError ? <div className="muted">会话列表加载失败：{threadError}</div> : null}
-      </section>
+        {threadError ? <div className="muted">会话加载失败：{threadError}</div> : null}
+      </aside>
 
-      <section className="panel" style={{ marginBottom: 14 }}>
-        <h3>历史消息</h3>
-        {selectedThreadId ? null : <div className="muted">当前为新会话，发送问题后自动创建线程</div>}
-        {messageError ? <div className="muted">消息加载失败：{messageError}</div> : null}
-        {messages.length === 0 ? <div className="muted">暂无历史消息</div> : null}
-        {messages.map((msg) => (
-          <article key={msg.id} className="trace-item">
-            <div className="toolbar" style={{ marginBottom: 6 }}>
-              <strong>{msg.role === "user" ? "我" : msg.role === "assistant" ? "助手" : msg.role}</strong>
-              <span className="muted">{msg.createdAt}</span>
-            </div>
-            <div className="answer-box" style={{ minHeight: 0 }}>
-              {msg.content}
-            </div>
-          </article>
-        ))}
-      </section>
+      <section className="chat-canvas">
+        <header className="chat-canvas-header">
+          <div>
+            <strong>{selectedThread?.title || "新会话"}</strong>
+            <div className="muted">状态：{status}</div>
+          </div>
+          <div className="toolbar" style={{ marginBottom: 0 }}>
+            <button disabled={run.isRunning} onClick={() => void loadThreads()}>
+              刷新会话
+            </button>
+            <button disabled={run.isRunning} onClick={() => void loadMaterials()}>
+              刷新资料
+            </button>
+          </div>
+        </header>
 
-      <ChatAskInputPanel
-        question={question}
-        isRunning={run.isRunning}
-        canSubmit={canSubmit}
-        canCancel={run.canCancel}
-        selectedCategoryIds={categoryIds}
-        categoryOptions={categoryOptions}
-        categoryOptionsLoading={categoryLoading}
-        categoryOptionsError={categoryError}
-        serverHealthError={serverHealthError}
-        onRetryHealthCheck={() => {
-          void runHealthCheck();
-        }}
-        onQuestionChange={setQuestion}
-        onChangeCategoryIds={setCategoryIds}
-        onSubmit={async () => {
-          const content = question.trim();
-          if (!content) {
-            return;
-          }
-          if (serverHealthError) {
-            const healthy = await runHealthCheck();
-            if (!healthy) {
+        <div className="chat-message-scroll" ref={messageScrollRef}>
+          {messages.map((msg) => {
+            const roleClass = msg.role === "user" ? "user" : "assistant";
+            const citations = parseMessageCitations(msg.citationsJson);
+            return (
+              <article key={msg.id} className={`chat-bubble ${roleClass}`}>
+                <div className="chat-bubble-meta">
+                  <span>{msg.role === "user" ? "我" : "AI"}</span>
+                  <span>{msg.createdAt}</span>
+                </div>
+                {msg.role === "assistant" ? (
+                  <MarkdownMessage className="chat-bubble-content" text={msg.content} />
+                ) : (
+                  <div className="chat-bubble-content chat-bubble-content-plain">{msg.content}</div>
+                )}
+                {citations.length > 0 ? (
+                  <div className="chat-bubble-citations">
+                    {citations.map((citation) => (
+                      <button
+                        key={citation.citationId}
+                        className="chat-citation-chip"
+                        onClick={() => {
+                          props.onOpenMaterialCitation?.({
+                            materialId: citation.materialId,
+                            preferredContentKind: citation.level,
+                            highlightSnippet: citation.snippet,
+                          });
+                        }}
+                      >
+                        {citation.materialTitle}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+              </article>
+            );
+          })}
+
+          {optimisticQuestion ? (
+            <article className="chat-bubble user optimistic">
+              <div className="chat-bubble-meta">
+                <span>我</span>
+                <span>发送中</span>
+              </div>
+              <div className="chat-bubble-content chat-bubble-content-plain">{optimisticQuestion}</div>
+            </article>
+          ) : null}
+
+          {liveAnswerVisible ? (
+            <article className="chat-bubble assistant">
+              <div className="chat-bubble-meta">
+                <span>AI</span>
+                <span>{run.isRunning ? "思考中" : "完成"}</span>
+              </div>
+              {answer.text ? (
+                <MarkdownMessage className="chat-bubble-content" text={answer.text} />
+              ) : (
+                <div className="chat-bubble-content chat-bubble-content-plain">{run.isRunning ? "正在生成回答..." : ""}</div>
+              )}
+              {answerMeta.error ? <div className="mention-error">{answerMeta.error.message}</div> : null}
+              {liveCitations.length > 0 ? (
+                <div className="chat-bubble-citations">
+                  {liveCitations.map((citation) => (
+                    <button
+                      key={citation.citationId}
+                      className="chat-citation-chip"
+                      onClick={() => {
+                        props.onOpenMaterialCitation?.({
+                          materialId: citation.materialId,
+                          preferredContentKind: citation.level,
+                          highlightSnippet: citation.snippet,
+                        });
+                      }}
+                    >
+                      {citation.materialTitle}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+              {canRetry ? (
+                <div className="toolbar" style={{ marginBottom: 0, marginTop: 8 }}>
+                  <button
+                    onClick={async () => {
+                      const retryQuestion = run.runState.question.trim();
+                      if (!retryQuestion) {
+                        return;
+                      }
+                      try {
+                        const retryScopeOverride =
+                          run.runState.scopeType === "material" && run.runState.scopeId
+                            ? {
+                                scopeType: "material" as const,
+                                scopeId: run.runState.scopeId,
+                              }
+                            : undefined;
+                        setOptimisticQuestion(retryQuestion);
+                        await run.ask({
+                          threadId: selectedThreadId ?? undefined,
+                          question: retryQuestion,
+                          scopeOverride: retryScopeOverride,
+                        });
+                      } catch (err) {
+                        setOptimisticQuestion("");
+                        window.alert(err instanceof Error ? err.message : "提问失败");
+                      }
+                    }}
+                  >
+                    重试
+                  </button>
+                </div>
+              ) : null}
+            </article>
+          ) : null}
+
+          {!messageError && messages.length === 0 && !optimisticQuestion && !liveAnswerVisible ? (
+            <div className="muted">开始提问吧。输入 @ 可指定单资料会话。</div>
+          ) : null}
+          {messageError ? <div className="muted">消息加载失败：{messageError}</div> : null}
+          {materialsError ? <div className="muted">资料加载失败：{materialsError}</div> : null}
+        </div>
+
+        <UnifiedChatAskInputPanel
+          question={question}
+          isRunning={run.isRunning}
+          canSubmit={canSubmit}
+          canCancel={run.canCancel}
+          selectedMentionTitle={selectedMention?.title}
+          mentionCandidates={mentionCandidates}
+          mentionError={mentionError}
+          serverHealthError={serverHealthError}
+          onRetryHealthCheck={() => {
+            void runHealthCheck();
+          }}
+          onQuestionChange={(value) => {
+            setQuestion(value);
+            setMentionError("");
+            const selectedTokens = extractSelectedMentionTokens(value);
+            if (selectedTokens.length !== 1) {
+              setSelectedMention(null);
               return;
             }
-          }
-          try {
-            await run.ask({
-              threadId: selectedThreadId ?? undefined,
-              question: content,
-              filters: {
-                categoryIds,
-              },
-              options: {
-                maxCandidateMaterials: 8,
-                maxExpandedMaterials: 3,
-                streamTrace: true,
-                timeoutMs: 120000,
-              },
+            if (selectedMention && selectedTokens[0]?.title !== selectedMention.title) {
+              setSelectedMention(null);
+            }
+          }}
+          onMentionQueryChange={setMentionQuery}
+          onSelectMention={(candidate) => {
+            setSelectedMention({
+              materialId: candidate.materialId,
+              title: candidate.title,
             });
-            setQuestion("");
-          } catch (err) {
-            const message = err instanceof Error ? err.message : "提问失败";
-            if (message.includes("无法连接后端服务") || message.includes("流式提问失败")) {
-              setServerHealthError(message);
+            setMentionError("");
+            setMentionQuery("");
+          }}
+          onClearMention={() => {
+            setSelectedMention(null);
+            setMentionError("");
+          }}
+          onSubmit={async () => {
+            const content = question.trim();
+            if (!content) {
+              return;
             }
-            window.alert(message);
-          }
-        }}
-        onCancel={async () => {
-          await run.cancel();
-        }}
-      />
-
-      <div className="chat-layout">
-        <div className="chat-col">
-          <ChatProgressPanel
-            overallProgress={overallProgress}
-            runStatus={status}
-            stages={stageTimeline}
-            startedAt={run.runState.startedAt}
-            finishedAt={run.runState.finishedAt}
-          />
-        </div>
-
-        <div className="chat-col">
-          <ChatAnswerPanel
-            text={answer.text}
-            isStreaming={answer.isStreaming}
-            isFinal={answer.isFinal}
-            status={status}
-            error={answerMeta.error}
-            citationIds={answerMeta.citationIds}
-            onRetry={
-              canRetry
-                ? async () => {
-                    const retryQuestion = run.runState.question.trim();
-                    if (!retryQuestion) {
-                      return;
-                    }
-                    try {
-                      await run.ask({
-                        threadId: selectedThreadId ?? undefined,
-                        question: retryQuestion,
-                        filters: { categoryIds },
-                      });
-                    } catch (err) {
-                      window.alert(err instanceof Error ? err.message : "提问失败");
-                    }
-                  }
-                : undefined
+            const validation = validateQuestionMention(content, selectedMention?.title ?? null);
+            if (!validation.ok) {
+              setMentionError(validation.errorMessage ?? "请先完成 @文件 选择");
+              return;
             }
-            onCopy={(text) => {
-              void navigator.clipboard.writeText(text);
-            }}
-          />
 
-          <ChatTracePanel
-            items={traceTimeline}
-            isRunning={run.isRunning}
-            hasFinalTrace={run.runState.traceSteps.some((x) => x.source === "trace.final")}
-          />
-        </div>
-
-        <div className="chat-col">
-          <ChatCitationsPanel
-            citations={citations}
-            candidates={run.runState.retrieval.candidates}
-            isRunning={run.isRunning}
-            onOpenMaterial={(payload) => {
-              props.onOpenMaterialCitation?.({
-                materialId: payload.materialId,
-                preferredContentKind: payload.level,
-                highlightSnippet: payload.snippet,
+            if (serverHealthError) {
+              const healthy = await runHealthCheck();
+              if (!healthy) {
+                return;
+              }
+            }
+            setOptimisticQuestion(content);
+            try {
+              await run.ask({
+                threadId: selectedThreadId ?? undefined,
+                question: content,
+                scopeOverride: selectedMention
+                  ? {
+                      scopeType: "material",
+                      scopeId: selectedMention.materialId,
+                    }
+                  : undefined,
+                options: {
+                  maxCandidateMaterials: 8,
+                  maxExpandedMaterials: 3,
+                  streamTrace: true,
+                  timeoutMs: 120000,
+                },
               });
-            }}
-          />
-        </div>
-      </div>
+              setQuestion("");
+              setMentionQuery("");
+              setMentionError("");
+              setSelectedMention(null);
+              setOptimisticQuestion("");
+            } catch (err) {
+              setOptimisticQuestion("");
+              const message = err instanceof Error ? err.message : "提问失败";
+              if (message.includes("无法连接后端服务") || message.includes("流式提问失败")) {
+                setServerHealthError(message);
+              }
+              window.alert(message);
+            }
+          }}
+          onCancel={async () => {
+            await run.cancel();
+          }}
+        />
+      </section>
     </section>
   );
 }
 
-function flattenCategoryNodes(
-  nodes: CategoryNodeVO[],
-  depth = 0,
-): Array<{ id: string; path: string; depth: number }> {
-  const result: Array<{ id: string; path: string; depth: number }> = [];
-  for (const node of nodes) {
-    result.push({
-      id: node.id,
-      path: node.path,
-      depth,
-    });
-    result.push(...flattenCategoryNodes(node.children, depth + 1));
+function parseMessageCitations(json: string | null): MessageCitation[] {
+  if (!json) {
+    return [];
   }
-  return result;
+  try {
+    const parsed = JSON.parse(json) as MessageCitation[];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function normalizeForDedup(value: string): string {
+  return value.trim().replace(/\r\n/g, "\n");
+}
+
+function normalizeMentionTitle(value?: string): string {
+  return (value ?? "").replace(/[{}]/g, "").trim();
 }

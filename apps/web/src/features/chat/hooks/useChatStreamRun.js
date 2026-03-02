@@ -32,6 +32,7 @@ export function useChatStreamRun(options) {
         const finalReq = {
             threadId,
             question: req.question,
+            scopeOverride: req.scopeOverride,
             filters: req.filters,
             options: req.options,
         };

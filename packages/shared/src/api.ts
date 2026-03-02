@@ -155,6 +155,10 @@ export interface MaterialCategoryBindReq {
 export interface ChatAskReq {
   threadId: string;
   question: string;
+  scopeOverride?: {
+    scopeType: "global" | "material";
+    scopeId: string | null;
+  };
   filters?: {
     categoryIds?: string[];
     materialIds?: string[];
