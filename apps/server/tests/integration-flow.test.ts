@@ -341,6 +341,48 @@ test("单资料模式：检索零命中时仍注入当前资料", async () => {
   }
 });
 
+test("普通会话线程：通过 scopeOverride 指定资料时应按单资料范围检索", async () => {
+  const ctx = setupTestContext();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = createFetchMock();
+
+  try {
+    const importResp = await importReadyMaterial(ctx);
+    const thread = ctx.chatService.createThread({
+      scopeType: "global",
+      scopeId: null,
+      title: "普通会话 scopeOverride 单资料",
+    });
+
+    const raw = createMockSseRaw();
+    await ctx.chatService.streamAnswer(
+      { scopeType: "material", scopeId: importResp.materialId },
+      {
+        threadId: thread.id,
+        question: "请基于指定资料总结核心观点",
+      },
+      { raw } as unknown as FastifyReply,
+    );
+
+    const events = parseSseEvents(raw.getText());
+    const candidatesEvent = events.find(
+      (event): event is Extract<ChatStreamEventType, { type: "retrieval.candidates" }> =>
+        event.type === "retrieval.candidates",
+    );
+    assert.ok(candidatesEvent);
+    assert.ok(candidatesEvent.payload.candidates.some((x) => x.materialId === importResp.materialId));
+
+    const citations = events.filter(
+      (event): event is Extract<ChatStreamEventType, { type: "citation.appended" }> => event.type === "citation.appended",
+    );
+    assert.ok(citations.length > 0);
+    assert.ok(citations.every((event) => event.payload.materialId === importResp.materialId));
+  } finally {
+    globalThis.fetch = originalFetch;
+    ctx.cleanup();
+  }
+});
+
 test("单资料模式：分类不匹配时仍注入当前资料", async () => {
   const ctx = setupTestContext();
   const originalFetch = globalThis.fetch;

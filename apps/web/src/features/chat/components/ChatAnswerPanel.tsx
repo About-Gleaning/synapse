@@ -1,4 +1,5 @@
 import type { ChatRunStatus } from "@synapse/shared";
+import { MarkdownMessage } from "./MarkdownMessage";
 
 export interface ChatAnswerPanelProps {
   text: string;
@@ -28,7 +29,9 @@ export function ChatAnswerPanel(props: ChatAnswerPanelProps): React.JSX.Element 
       </div>
 
       {props.error ? <div className="muted">错误：{props.error.message}</div> : null}
-      <article className="answer-box">{props.text || "等待回答..."}</article>
+      <article className="answer-box">
+        {props.text ? <MarkdownMessage text={props.text} /> : <div className="answer-box-plain">等待回答...</div>}
+      </article>
       <div className="muted">
         {props.isStreaming ? "流式输出中..." : props.isFinal ? "输出完成" : "尚未完成"}
       </div>

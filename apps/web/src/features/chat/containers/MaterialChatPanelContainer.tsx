@@ -4,6 +4,7 @@ import { checkServerHealth, getThreadMessages, listThreads } from "../api/chatAp
 import { ChatAnswerPanel } from "../components/ChatAnswerPanel";
 import { ChatAskInputPanel } from "../components/ChatAskInputPanel";
 import { ChatCitationsPanel } from "../components/ChatCitationsPanel";
+import { MarkdownMessage } from "../components/MarkdownMessage";
 import { ChatProgressPanel } from "../components/ChatProgressPanel";
 import { ChatRunStatusBadge } from "../components/ChatRunStatusBadge";
 import { ChatTracePanel } from "../components/ChatTracePanel";
@@ -234,7 +235,11 @@ export function MaterialChatPanelContainer(props: MaterialChatPanelContainerProp
               <span className="muted">{msg.createdAt}</span>
             </div>
             <div className="answer-box" style={{ minHeight: 0 }}>
-              {msg.content}
+              {msg.role === "assistant" ? (
+                <MarkdownMessage text={msg.content} />
+              ) : (
+                <div className="answer-box-plain">{msg.content}</div>
+              )}
             </div>
           </article>
         ))}
